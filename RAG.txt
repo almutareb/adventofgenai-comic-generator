@@ -1,0 +1,546 @@
+# Retrieval Augmented Generation (RAG) with LangChain on the Intel Developer Cloud IDC
+
+### 1. Retrieval Augmented Generation (RAG):
+Retrieval Augmented Generation (RAG) is a novel approach that combines the strengths of large-scale retrieval systems with the generative capabilities of transformers like GPT. In a RAG-based system, when a question is posed, relevant documents or passages are retrieved from a corpus, and then fed alongside the query to a generative model. This two-step process enables the model to leverage both external knowledge from the corpus and its internal knowledge to produce more informed and contextually accurate responses.
+
+### 2. In-context Learning:
+Traditional machine learning models learn from extensive labeled datasets. In contrast, in-context learning pertains to models, especially language models, leveraging a few examples or context provided at inference time to tailor their outputs. This technique allows LLMs to be dynamically adapted to new tasks without undergoing explicit fine-tuning.
+
+### 3. LLM Chains/Pipelines:
+LLM chains or pipelines involve stringing together multiple stages or components of a system to achieve a complex task. For instance, in a RAG system, a retrieval component fetches relevant data from a database, followed by a generation component that constructs the final answer. By chaining different LLM modules, developers can build systems that harness diverse capabilities and can be modularly updated or optimized.
+
+### 4. RAG for On-Premise LLM Applications:
+With the growing need for data privacy and proprietary data handling, many enterprises seek solutions to harness the power of LLMs in-house. RAG provides a unique opportunity for such use-cases. By integrating RAG with on-premise data repositories, enterprises can build powerful LLM applications tailored to their specific needs, while ensuring data confidentiality.
+
+### 5. RAG vs Fine-Tuning:
+While RAG is a powerful approach on its own, it can also be combined with fine-tuning to enhance LLM capabilities further. Fine-tuning allows models to be explicitly trained on specific datasets, honing them for certain tasks. When coupled with RAG, fine-tuned models can make informed decisions using retrieved external knowledge, yielding even more precise and task-specific results.
+
+#### Install dependencies. Only run the first time.
+
+import sys
+import os
+#!{sys.executable} -m pip install langchain==0.0.335 --no-warn-script-location > /dev/null
+#!{sys.executable} -m pip install pygpt4all==1.1.0 --no-warn-script-location > /dev/null
+#!{sys.executable} -m pip install gpt4all==1.0.12 --no-warn-script-location > /dev/null
+#!{sys.executable} -m pip install transformers==4.35.1 --no-warn-script-location > /dev/null
+#!{sys.executable} -m pip install datasets==2.14.6 --no-warn-script-location > /dev/null
+#!{sys.executable} -m pip install tiktoken==0.4.0 --no-warn-script-location > /dev/null
+#!{sys.executable} -m pip install chromadb==0.4.15 --no-warn-script-location > /dev/null
+#!{sys.executable} -m pip install sentence_transformers==2.2.2 --no-warn-script-location > /dev/null
+
+
+The code below builds RAGBot. RAGBot class is a streamlined implementation of a Retrieval-Augmented Generation (RAG) chatbot, designed to integrate large language models for generating contextually relevant responses. At its core, it manages the downloading of specific language models, such as the "Falcon" model, with support for handling large model files. It also automates the process of fetching and structuring dialogue datasets from predefined sources. The chatbot utilizes the GPT4All model, which is adjustable for various operational parameters like the number of threads and maximum tokens, to enhance response generation efficiency. A key feature of RAGBot is its ability to build a vector database for text retrieval, significantly bolstering its ability to pull relevant document snippets based on user queries. This functionality, combined with a retrieval mechanism and an inference method, makes RAGBot a simple tool for developers aiming to learn about RAG and leverage this implementation as a basis for their implementation.
+
+import requests
+import contextlib
+import pandas as pd
+import time
+import io
+
+from tqdm import tqdm
+from langchain.llms import GPT4All
+from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
+
+from langchain.chains import LLMChain
+from langchain.prompts import PromptTemplate
+from langchain.document_loaders import TextLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.indexes import VectorstoreIndexCreator
+from langchain.embeddings import HuggingFaceEmbeddings
+from datasets import load_dataset
+
+
+class RAGBot:
+    """
+    A class to handle model downloading, dataset management, model loading, vector database
+    creation, retrieval mechanisms, and inference for a response generation bot.
+
+    Attributes
+    ----------
+    model_path : str
+        The file path where the model is stored.
+    data_path : str
+        The file path where the dataset is stored.
+    user_input : str
+        The input provided by the user for generating a response.
+    model : str
+        The name of the model being used.
+    """
+
+    def __init__(self):
+        """
+        Initializes the RAGBot with default values for model path, data path,
+        user input, and model.
+        """
+        self.model_path = ""
+        self.data_path = ""
+        self.user_input = ""
+        self.model = ""
+
+    def get_model(self, model, chunk_size: int = 10000):
+        """
+        Downloads the specified model to the model path. Supports downloading of large
+        models in chunks.
+
+        Additional download tooling is reserved for users to add their own models. Currently hardcoded to load Falcon from 
+
+        Parameters
+        ----------
+        model : str
+            The name of the model to be downloaded.
+        chunk_size : int, optional
+            The size of each chunk of data to download at a time, by default 10000.
+        """
+
+        self.model = model
+
+        if self.model == "Falcon":
+            self.model_path = "/home/common/data/Big_Data/GenAI/llm_models/nomic-ai--gpt4all-falcon-ggml/ggml-model-gpt4all-falcon-q4_0.bin"
+        elif model == "More Models Coming Soon!":
+            print("More models coming soon, defaulting to Falcon for now!")
+            self.model_path = "/home/common/data/Big_Data/GenAI/llm_models/nomic-ai--gpt4all-falcon-ggml/ggml-model-gpt4all-falcon-q4_0.bin"
+
+        if not os.path.isfile(self.model_path):
+            # send a GET request to the URL to download the file. Stream since it's large
+            response = requests.get(url, stream=True)
+            # open the file in binary mode and write the contents of the response to it in chunks
+            # This is a large file, so be prepared to wait.
+            with open(self.model_path, 'wb') as f:
+                for chunk in tqdm(response.iter_content(chunk_size=10000)):
+                    if chunk:
+                        f.write(chunk)
+        else:
+            print('model already exists in path.')
+
+    def download_dataset(self, dataset):
+        """
+        Downloads the specified dataset and saves it to the data path.
+
+        Parameters
+        ----------
+        dataset : str
+            The name of the dataset to be downloaded.
+        """
+        self.data_path = dataset + '_dialogues.txt'
+
+        if not os.path.isfile(self.data_path):
+
+            datasets = {"robot maintenance": "FunDialogues/customer-service-robot-support", 
+                        "basketball coach": "FunDialogues/sports-basketball-coach", 
+                        "physics professor": "FunDialogues/academia-physics-office-hours",
+                        "grocery cashier" : "FunDialogues/customer-service-grocery-cashier"}
+            
+            # Download the dialogue from hugging face
+            dataset = load_dataset(f"{datasets[dataset]}")
+            # Convert the dataset to a pandas dataframe
+            dialogues = dataset['train']
+            df = pd.DataFrame(dialogues, columns=['id', 'description', 'dialogue'])
+            # Print the first 5 rows of the dataframe
+            df.head()
+            # only keep the dialogue column
+            dialog_df = df['dialogue']
+            
+            # save the data to txt file
+            dialog_df.to_csv(self.data_path, sep=' ', index=False)
+        else:
+            print('data already exists in path.')        
+
+    def load_model(self, n_threads, max_tokens, repeat_penalty, n_batch, top_k, temp):
+        """
+        Loads the model with specified parameters for parallel processing.
+
+        Parameters
+        ----------
+        n_threads : int
+            The number of threads for parallel processing.
+        max_tokens : int
+            The maximum number of tokens for model prediction.
+        repeat_penalty : float
+            The penalty for repeated tokens in generation.
+        n_batch : int
+            The number of batches for processing.
+        top_k : int
+            The number of top k tokens to be considered in sampling.
+        """
+        # Callbacks support token-wise streaming
+        callbacks = [StreamingStdOutCallbackHandler()]
+        # Verbose is required to pass to the callback manager
+
+        self.llm = GPT4All(model=self.model_path, callbacks=callbacks, verbose=False,
+                           n_threads=n_threads, n_predict=max_tokens, repeat_penalty=repeat_penalty, 
+                           n_batch=n_batch, top_k=top_k, temp=temp)
+
+    def build_vectordb(self, chunk_size, overlap):
+        """
+        Builds a vector database from the dataset for retrieval purposes.
+
+        Parameters
+        ----------
+        chunk_size : int
+            The size of text chunks for vectorization.
+        overlap : int
+            The overlap size between chunks.
+        """
+        loader = TextLoader(self.data_path)
+        # Text Splitter
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=overlap)
+        # Embed the document and store into chroma DB
+        self.index = VectorstoreIndexCreator(embedding= HuggingFaceEmbeddings(), text_splitter=text_splitter).from_loaders([loader])
+
+    def retrieval_mechanism(self, user_input, top_k=1, context_verbosity = False, rag_off= False):
+        """
+        Retrieves relevant document snippets based on the user's query.
+
+        Parameters
+        ----------
+        user_input : str
+            The user's input or query.
+        top_k : int, optional
+            The number of top results to return, by default 1.
+        context_verbosity : bool, optional
+            If True, additional context information is printed, by default False.
+        rag_off : bool, optional
+            If True, disables the retrieval-augmented generation, by default False.
+        """
+
+        self.user_input = user_input
+        self.context_verbosity = context_verbosity
+                
+        # perform a similarity search and retrieve the context from our documents
+        results = self.index.vectorstore.similarity_search(self.user_input, k=top_k)
+        # join all context information into one string 
+        context = "\n".join([document.page_content for document in results])
+        if self.context_verbosity:
+            print(f"Retrieving information related to your question...")
+            print(f"Found this content which is most similar to your question: {context}")
+
+        if rag_off:
+            template = """Question: {question}
+            Answer: This is the response: """
+            self.prompt = PromptTemplate(template=template, input_variables=["question"])
+        else:     
+            template = """ Don't just repeat the following context, use it in combination with your knowledge to improve your answer to the question:{context}
+
+            Question: {question}
+            """
+            self.prompt = PromptTemplate(template=template, input_variables=["context", "question"]).partial(context=context)
+
+
+    def inference(self):
+        """
+        Performs inference to generate a response based on the user's query.
+
+        Returns
+        -------
+        str
+            The generated response.
+        """
+
+        if self.context_verbosity:
+            print(f"Your Query: {self.prompt}")
+            
+        llm_chain = LLMChain(prompt=self.prompt, llm=self.llm)
+        print("Processing the information with gpt4all...\n")
+        response = llm_chain.run(self.user_input)
+
+        return  response  
+    
+
+# Customizing Your RAG LLM Chatbot Experience
+
+Welcome to the RAG LLM Chatbot interface! This guide will help you understand how to use the various widgets to customize your chatbot experience.
+
+## Interface Elements
+
+### Model Selection
+- **Model Dropdown**: Choose the model for your chatbot.
+  - Available options include 'Falcon' and 'More Models Coming Soon!'.
+  - This dropdown allows you to select the underlying model your chatbot will use for generating responses.
+
+### Query Input
+- **Query Text Box**: Enter your query here.
+  - Type the question or statement you want the chatbot to respond to.
+
+### Response Customization
+- **Top K Slider**: Adjust the number of top results to consider for generating responses.
+  - Slide to increase or decrease the value. The range is from 1 to 4.
+  - This adjusts how many top possibilities the model considers when crafting a response.
+
+- **RAG OFF Checkbox**: Toggle whether to use Retrieval-Augmented Generation (RAG) or not.
+  - Check this box if you want to turn off RAG and use only the raw model and prompt for inference.
+
+### Data Processing Settings
+- **Chunk Size Input**: Set the size of text chunks for processing.
+  - Enter a value to determine how large each text chunk should be. The range is from 5 to 5000.
+  - This affects how the text data is segmented for analysis.
+
+- **Overlap Input**: Define the overlap size between chunks.
+  - Set a value for how much overlap there should be between text chunks. The range is from 0 to 1000.
+  - This can influence the continuity in data processing.
+
+### Dataset and Performance
+- **Dataset Dropdown**: Choose the dataset for training your model.
+  - Select from options like 'robot maintenance', 'basketball coach', 'physics professor', 'grocery cashier'.
+  - The dataset selected will be used to train and inform the chatbot's responses.
+
+- **Threads Slider**: Select the number of threads for parallel processing.
+  - Adjust the slider to set the number of threads. The range is from 2 to 200.
+  - This setting can affect the performance and speed of your model's processing.
+
+- **Max Tokens Input**: Specify the maximum number of tokens for model prediction.
+  - Enter a value to set the limit for the number of tokens. The range is from 5 to 500.
+  - This sets a cap on the length of the generated responses.
+
+### Submit Button
+- **Submit**: Click this button to process your input and generate a response.
+  - Once you have set all your parameters, click here to see the chatbot in action!
+
+## How to Use
+1. Select your desired model from the **Model Dropdown**.
+2. Type your query in the **Query Text Box**.
+3. Adjust the **Top K Slider** to set the number of top results for response generation.
+4. Check or uncheck the **RAG OFF Checkbox** based on your preference.
+5. Set the **Chunk Size** and **Overlap** for data processing.
+6. Choose a dataset from the **Dataset Dropdown**.
+7. Adjust the **Threads Slider** and **Max Tokens Input** for performance.
+8
+
+*The first execution will load the model into memory, adding additional overhead. The model will not be reloaded unless you change model specific initialization parameters like threads or max tokens.*
+. Click **Submit** to generate and display the response.
+
+Enjoy interacting with your custom RAG LLM Chatbot!
+
+import ipywidgets as widgets
+from IPython.display import display, HTML
+
+bot = RAGBot()
+
+# Initialize previous value variables
+previous_threads = None
+previous_max_tokens = None
+previous_top_k = None
+previous_dataset = None
+previous_chunk_size = None
+previous_overlap = None
+previous_temp = None
+
+# Create an output widget
+output = widgets.Output()
+
+def process_inputs(b):
+    """
+    Process inputs from the interactive chat interface.
+
+    This function is triggered by a button click in the IPython widgets interface. It captures 
+    user inputs from various widget elements, such as dropdowns, sliders, and text inputs. The function 
+    handles model and dataset downloading, initiates model loading and vector database building, 
+    performs the retrieval mechanism, and generates a response to the user's query. The response is 
+    then displayed in a styled HTML format within the Jupyter Notebook.
+
+    Parameters
+    ----------
+    b : ipywidgets.widgets.widget_button.Button
+        The button widget that triggers this function. This parameter is required by the
+        widget framework but is not directly used in the function.
+
+    Notes
+    -----
+    - This function is designed to be used as a callback for an IPython button widget.
+    - It utilizes global variables to access and update the widget elements and their values.
+    - The function updates global variables to keep track of previous parameter values for 
+      efficient reloading of models and rebuilding of vector databases.
+    - Standard output and error output are captured and redirected to suppress unnecessary console logs,
+      while relevant output is displayed via the IPython display mechanism.
+    """
+    global previous_threads, previous_max_tokens, previous_top_k, previous_dataset, previous_chunk_size, previous_overlap, previous_temp
+
+    with output:
+        output.clear_output()
+        # Suppress output
+        f = io.StringIO()
+        with contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
+
+            # Function to process inputs
+            # Gather values from the widgets
+            model = model_dropdown.value
+            query = query_text.value
+            top_k = top_k_slider.value
+            chunk_size = chunk_size_input.value
+            overlap = overlap_input.value
+            dataset = dataset_dropdown.value
+            threads = threads_slider.value
+            max_tokens = max_token_input.value
+            rag_off = rag_off_checkbox.value
+            temp = temp_slider.value
+            bot.get_model(model = model)
+            bot.download_dataset(dataset = dataset)
+            if threads != previous_threads or max_tokens != previous_max_tokens or top_k != previous_top_k or temp != previous_temp:
+                print("loading model due incorporate new parameters")
+                bot.load_model(n_threads=threads, max_tokens=max_tokens, repeat_penalty=1.50, n_batch=threads, top_k=top_k, temp=temp)
+                # Update previous values
+                previous_threads = threads
+                previous_max_tokens = max_tokens
+                previous_top_k = top_k
+                previous_temp = temp
+            if dataset != previous_dataset or chunk_size != previous_chunk_size or overlap != previous_overlap:
+                print("rebuilding vector DB due to changing dataset, overlap, or chunk")
+                bot.build_vectordb(chunk_size = chunk_size, overlap = overlap)
+                previous_dataset = dataset
+                previous_chunk_size = chunk_size
+                previous_overlap = overlap
+            bot.retrieval_mechanism(user_input = query, rag_off = rag_off)
+            response = bot.inference()
+    
+            styled_response = f"""
+            <div style="
+                background-color: lightblue;
+                border-radius: 15px;
+                padding: 10px;
+                font-family: Arial, sans-serif;
+                color: black;
+                max-width: 600px;
+                word-wrap: break-word;
+                margin: 10px;
+                font-size: 14px;">
+                {response}
+            </div>
+            """
+            display(HTML(styled_response))
+
+def create_chat_interface():
+    global model_dropdown, query_text, top_k_slider, rag_off_checkbox, chunk_size_input, overlap_input, dataset_dropdown, threads_slider, max_token_input, repeat_penalty_input, temp_slider
+    # Model selection dropdown
+    model_dropdown = widgets.Dropdown(
+        options=['Falcon', 'More Models Coming Soon!'],
+        description='Model:',
+        disabled=False,
+    )
+
+    # User query text input
+    query_layout = widgets.Layout(width='400px', height='400px')  # Adjust the width as needed
+    query_text = widgets.Text(
+        placeholder='Type your query here',
+        description='Query:',
+        disabled=False, 
+        layout=query_layout
+    )
+
+    # Vector search top k slider
+    top_k_slider = widgets.IntSlider(
+        value=2,
+        min=1,
+        max=4,
+        step=1,
+        description='Top K:',
+        disabled=False,
+        continuous_update=False,
+        orientation='horizontal',
+        readout=True,
+        readout_format='d'
+    )
+
+    # Model Temperature slider
+    temp_slider = widgets.FloatSlider(
+    value=0.7,
+    min=0.1,
+    max=1.4,
+    step=0.1,
+    description='Temperature:',
+    disabled=False,
+    continuous_update=False,
+    orientation='horizontal',
+    readout=True,
+    readout_format='.1f'
+)
+    
+    # RAG OFF TOGGLE
+    rag_off_checkbox = widgets.Checkbox(
+    value=False,
+    description='RAG OFF?',
+    disabled=False,
+    indent=False,  # Set to True if you want the checkbox to be indented
+    tooltip='Turns off RAG and Performs Inference with Raw Model and Prompt Only'
+    )
+
+    # Chunk size number input
+    chunk_size_input = widgets.BoundedIntText(
+        value=500,
+        min=5,
+        max=5000,
+        step=1,
+        description='Chunk Size:',
+        disabled=False
+    )
+
+    # Overlap number input
+    overlap_input = widgets.BoundedIntText(
+        value=50,
+        min=0,
+        max=1000,
+        step=1,
+        description='Overlap:',
+        disabled=False
+    )
+
+    # Dataset selection dropdown
+    dataset_dropdown = widgets.Dropdown(
+        options=['robot maintenance', 'basketball coach', 'physics professor', 'grocery cashier'],
+        description='Dataset:',
+        disabled=False,
+    )
+
+    # Number of threads slider
+    threads_slider = widgets.IntSlider(
+        value=64,
+        min=2,
+        max=200,
+        step=1,
+        description='Threads:',
+        disabled=False,
+        continuous_update=False,
+        orientation='horizontal',
+        readout=True,
+        readout_format='d'
+    )
+
+    # Max token number input
+    max_token_input = widgets.BoundedIntText(
+        value=50,
+        min=5,
+        max=500,
+        step=5,
+        description='Max Tokens:',
+        disabled=False
+    )
+
+    # Group the widgets except the query text into a VBox
+    left_column = widgets.VBox([model_dropdown, top_k_slider, temp_slider, rag_off_checkbox, chunk_size_input, 
+                                overlap_input, dataset_dropdown, threads_slider, max_token_input])
+
+    # Submit button
+    submit_button = widgets.Button(description="Submit")
+    submit_button.on_click(process_inputs)
+
+    right_column = widgets.VBox([query_text, submit_button])
+
+    # Use HBox to position the VBox and query text side by side
+    interface_layout = widgets.HBox([left_column, right_column])
+
+
+    # Display the layout
+    display(interface_layout, output)
+
+create_chat_interface()
+
+## Disclaimer for Using Large Language Models
+
+Please be aware that while Large Language Models like Falcon are powerful tools for text generation, they may sometimes produce results that are unexpected, biased, or inconsistent with the given prompt. It's advisable to carefully review the generated text and consider the context and application in which you are using these models.
+
+Usage of these models must also adhere to the licensing agreements and be in accordance with ethical guidelines and best practices for AI. If you have any concerns or encounter issues with the models, please refer to the respective model cards and documentation provided in the links above.
+
+To the extent that any public or non-Intel datasets or models are referenced by or accessed using these materials those datasets or models are provided by the third party indicated as the content source. Intel does not create the content and does not warrant its accuracy or quality. By accessing the public content, or using materials trained on or with such content, you agree to the terms associated with that content and that your use complies with the applicable license.
+
+ 
+Intel expressly disclaims the accuracy, adequacy, or completeness of any such public content, and is not liable for any errors, omissions, or defects in the content, or for any reliance on the content. Intel is not liable for any liability or damages relating to your use of public content.
+
+Intel’s provision of these resources does not expand or otherwise alter Intel’s applicable published warranties or warranty disclaimers for Intel products or solutions, and no additional obligations, indemnifications, or liabilities arise from Intel providing such resources. Intel reserves the right, without notice, to make corrections, enhancements, improvements, and other changes to its materials.
